@@ -1,0 +1,59 @@
+{% extends "base.html" %}
+{% block title %}EC Review Inbox{% endblock %}
+{% block content %}
+  <h1>EC review inbox</h1>
+  <p class="muted">Cases routed here by the patient-facing intake app (approval_fl = 'F' means not yet reviewed).</p>
+
+  <h2>Pending ({{ pending|length }})</h2>
+  <p class="muted">Patient name, allergies, and medications below are queried live from Photon (one call per row) --
+    not stored in this app's own database. Fine at this scale; see README for the tradeoff at real volume.</p>
+  {% if pending %}
+  <p class="muted">Urgency notes below are Claude's plain-language read of the deterministic eligibility
+    engine's own output (see triage_agent.py) -- not a new clinical judgment, and never shown when the
+    assistant is unavailable.</p>
+  <table>
+    <tr><th>Patient</th><th>Weight (lb)</th><th>Hours since</th><th>Allergies</th><th>Medications</th><th>Received</th><th></th><th></th></tr>
+    {% for c in pending %}
+    <tr>
+      <td>#{{ c.id }} {{ (c.patient.name if c.patient else None) or 'Unknown' }} <span class="muted">{{ c.external_id }}</span></td>
+      <td>{{ c.weight_lb }}</td>
+      <td>{{ c.hours_since_intercourse }}</td>
+      <td>{{ c.patient.allergies|join(', ') if c.patient and c.patient.allergies else '—' }}</td>
+      <td>{{ c.patient.current_medications|join(', ') if c.patient and c.patient.current_medications else '—' }}</td>
+      <td class="muted">{{ c.created_at }}</td>
+      <td>
+        {% if c.triage %}
+          <span class="pill pill-{{ c.triage.urgency|replace('_', '-') }}">{{ c.triage.urgency|replace('_', ' ') }}</span>
+          <div class="muted" style="margin-top:4px;max-width:220px;">{{ c.triage.note }}</div>
+        {% endif %}
+      </td>
+      <td><a class="btn" href="{{ url_for('case_detail', case_id=c.id) }}">Review</a></td>
+    </tr>
+    {% endfor %}
+  </table>
+  {% else %}
+    <p class="muted">Nothing pending right now.</p>
+  {% endif %}
+
+  <h2>All cases</h2>
+  <table>
+    <tr><th>Case</th><th>Status</th><th>Chosen treatment</th><th>Created</th><th></th></tr>
+    {% for c in all_cases %}
+    <tr>
+      <td>#{{ c.id }}</td>
+      <td>
+        {% if c.approval_fl == 'T' %}
+          <span class="pill pill-approved">approved</span>
+        {% elif c.approval_fl == 'D' %}
+          <span class="pill pill-declined">declined</span>
+        {% else %}
+          <span class="pill pill-pending">pending</span>
+        {% endif %}
+      </td>
+      <td>{{ c.chosen_treatment or '—' }}</td>
+      <td class="muted">{{ c.created_at }}</td>
+      <td><a href="{{ url_for('case_detail', case_id=c.id) }}">View</a></td>
+    </tr>
+    {% endfor %}
+  </table>
+{% endblock %}

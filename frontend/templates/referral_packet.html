@@ -1,0 +1,56 @@
+{% extends "base.html" %}
+{% block title %}Referral packet -- Case #{{ case.id }}{% endblock %}
+{% block content %}
+  <p><a href="{{ url_for('case_detail', case_id=case.id) }}">&larr; Back to case</a></p>
+  <h1>Referral packet &mdash; Case #{{ case.id }}</h1>
+  <p class="muted">
+    Assembled by Claude from facts this system already decided elsewhere -- the deterministic
+    eligibility engine's verdict, the clinician's own approval, and Photon's real safety screen.
+    It adds no new clinical judgment; it only organizes what's already on record. See README.
+  </p>
+
+  {% if packet %}
+    <div class="card">
+      <h2 style="margin-top:0">{{ packet.patient_name or (patient.name or 'Unknown patient') }}</h2>
+      <p class="muted">Reference <code>{{ case.external_id }}</code></p>
+      <p>{{ packet.summary }}</p>
+    </div>
+
+    <div class="card">
+      <h2 style="margin-top:0">Treatment</h2>
+      <p><strong>{{ packet.treatment_selected }}</strong></p>
+      <p class="muted">{{ packet.eligibility_basis }}</p>
+    </div>
+
+    <div class="card">
+      <h2 style="margin-top:0">Safety screen</h2>
+      <p>{{ packet.safety_screen_result }}</p>
+      {% if packet.allergies_on_file %}
+        <p class="muted">Allergies on file: {{ packet.allergies_on_file|join(', ') }}</p>
+      {% endif %}
+      {% if packet.current_medications_on_file %}
+        <p class="muted">Current medications on file: {{ packet.current_medications_on_file|join(', ') }}</p>
+      {% endif %}
+    </div>
+
+    <div class="card">
+      <h2 style="margin-top:0">Approval record</h2>
+      <p>{{ packet.approval_record }}</p>
+    </div>
+  {% else %}
+    <div class="card">
+      <h2 style="margin-top:0">Packet unavailable</h2>
+      <p class="muted">
+        Claude couldn't assemble a packet right now{% if packet_error %}: {{ packet_error }}{% endif %}.
+        Here are the underlying case facts instead:
+      </p>
+      <dl class="kv">
+        <dt>Patient</dt><dd>{{ patient.name or 'Unknown' }}</dd>
+        <dt>Treatment</dt><dd>{{ case.chosen_treatment or '—' }}</dd>
+        <dt>Allergies</dt><dd>{{ patient.allergies|join(', ') if patient.allergies else 'None on file in Photon' }}</dd>
+        <dt>Current medications</dt><dd>{{ patient.current_medications|join(', ') if patient.current_medications else 'None on file in Photon' }}</dd>
+        <dt>Approved at</dt><dd>{{ case.approved_at }}</dd>
+      </dl>
+    </div>
+  {% endif %}
+{% endblock %}

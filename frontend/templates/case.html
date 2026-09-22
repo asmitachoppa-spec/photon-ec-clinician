@@ -1,0 +1,286 @@
+{% extends "base.html" %}
+{% block title %}Case #{{ case.id }}{% endblock %}
+{% block content %}
+  <p><a href="{{ url_for('inbox') }}">&larr; Inbox</a></p>
+  <h1>{{ patient.name or 'Unknown patient' }} &mdash; Case #{{ case.id }}
+    {% if case.approval_fl == 'T' %}<span class="pill pill-approved">approved</span>{% elif case.approval_fl == 'D' %}<span class="pill pill-declined">declined</span>{% else %}<span class="pill pill-pending">pending</span>{% endif %}
+  </h1>
+  <p class="muted">Photon patient: <code>{{ case.photon_patient_id or 'none' }}</code> &middot; reference <code>{{ case.external_id }}</code></p>
+  {% if patient._source == 'mock' %}
+    <p class="muted">&#9888; Live Photon lookup unavailable{% if patient._note %}: {{ patient._note }}{% endif %}</p>
+  {% endif %}
+
+  <div class="card">
+    <h2 style="margin-top:0">Reported intake</h2>
+    <dl class="kv">
+      <dt>Hours since intercourse</dt><dd>{{ case.hours_since_intercourse }}</dd>
+      <dt>Weight</dt><dd>{{ case.weight_lb }} lb</dd>
+      <dt>Allergies</dt><dd>{{ patient.allergies|join(', ') if patient.allergies else 'None on file in Photon' }}</dd>
+      <dt>Current medications</dt><dd>{{ patient.current_medications|join(', ') if patient.current_medications else 'None on file in Photon' }}</dd>
+      <dt>Interaction flags</dt><dd>{{ case.interacting_meds_found|join(', ') if case.interacting_meds_found else 'None' }}</dd>
+    </dl>
+    <p class="muted">Allergies and current medications above are queried live from the patient's real Photon record, not stored in this app's own database.</p>
+
+    {% if case.eligibility_summary %}
+    <h2>Deterministic eligibility engine output</h2>
+    <table>
+      <tr><th>Option</th><th>Eligible</th><th>Note</th></tr>
+      {% for o in case.eligibility_summary.options %}
+      <tr>
+        <td>{{ o.display_name }}</td>
+        <td>{{ '✓' if o.eligible else '✗' }}</td>
+        <td class="muted">{{ o.efficacy_note or (o.reasons|join('; ')) or '—' }}</td>
+      </tr>
+      {% endfor %}
+    </table>
+    {% endif %}
+  </div>
+
+  <div class="card">
+    <h2 style="margin-top:0">Choose a treatment to run a real Photon safety check</h2>
+    <form method="post" action="{{ url_for('screen_case', case_id=case.id) }}">
+      <div class="grid4">
+        {% for key, opt in treatment_options.items() %}
+        <button type="submit" name="treatment" value="{{ key }}"
+                class="treatment-btn{% if case.chosen_treatment_id and opt.term in (case.chosen_treatment or '')|lower %} selected{% endif %}"
+                style="border:none;">
+          <strong>{{ opt.label }}</strong>
+          <span>{{ opt.sublabel }}</span>
+        </button>
+        {% endfor %}
+      </div>
+    </form>
+
+    {% if case.screen_result %}
+      <h2>Photon safety check: {{ case.chosen_treatment }}</h2>
+      <p class="muted">Source: {{ case.screen_result._source }}{% if case.screen_result._source == 'mock' %} (Photon sandbox unreachable from this environment){% endif %}</p>
+      {% if case.screen_result.alerts %}
+        {% for a in case.screen_result.alerts %}
+          <div class="alert-{{ 'major' if a.severity == 'MAJOR' else 'moderate' }}">
+            <strong>{{ a.severity }}</strong> &mdash; {{ a.description }}
+          </div>
+        {% endfor %}
+      {% else %}
+        <p>No interaction or allergy alerts found.</p>
+      {% endif %}
+
+      {% if case.approval_fl != 'T' %}
+      <h2>AI-drafted recommendation</h2>
+      {% if ai_draft %}
+        <p><strong>{{ ai_draft.recommendation }}</strong></p>
+        <p>{{ ai_draft.rationale }}</p>
+        {% if ai_draft.safety_flags %}
+          <p class="muted">Flags: {{ ai_draft.safety_flags|join('; ') }}</p>
+        {% endif %}
+        {% if ai_draft.patient_counseling_notes %}
+          <p class="muted">Counseling notes: {{ ai_draft.patient_counseling_notes|join('; ') }}</p>
+        {% endif %}
+      {% else %}
+        <p class="muted">Assistant unavailable{% if assistant_error %}: {{ assistant_error }}{% endif %} -- proceed on the Photon screen results above alone.</p>
+      {% endif %}
+      {% endif %}
+    {% elif case.chosen_treatment_id %}
+      <p class="muted" id="screen-pending">Running a real Photon safety check for {{ case.chosen_treatment }}, as you (the logged-in clinician)&hellip;</p>
+      <script type="module">
+        import { PhotonClient } from "https://cdn.jsdelivr.net/npm/@photonhealth/sdk/+esm";
+
+        // prescriptionScreen requires a real logged-in provider's User
+        // Access Token -- confirmed against the live sandbox, where an M2M
+        // token gets "Could not get user for request" even for a patient
+        // it can otherwise read (a fake patient ID fails a *different*,
+        // earlier "not authorized" check instead -- that's how this got
+        // isolated). So this one call runs here in the browser, reusing the
+        // same Auth0 session the <photon-client auto-login> widget below
+        // this card already establishes, instead of the Flask backend's
+        // M2M client. See README for the SSO/third-party-cookie caveat:
+        // this needs Auth0's silent-auth iframe to work, which some
+        // browsers' third-party cookie blocking can interfere with -- if
+        // so this falls back to mock data below, same as any other
+        // unreachable-Photon case in this workspace.
+        (async () => {
+          const caseId = {{ case.id | tojson }};
+          const patientId = {{ case.photon_patient_id | tojson }};
+          const treatmentId = {{ case.chosen_treatment_id | tojson }};
+          const statusEl = document.getElementById("screen-pending");
+
+          async function reportResult(body) {
+            try {
+              await fetch(`/case/${caseId}/run_screen`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(body),
+              });
+            } finally {
+              window.location.reload();
+            }
+          }
+
+          if (!patientId || !treatmentId) {
+            await reportResult({ client_error: "Missing photon_patient_id or chosen_treatment_id on this case." });
+            return;
+          }
+
+          try {
+            const client = new PhotonClient({
+              clientId: {{ photon_elements_client_id | tojson }},
+              organization: {{ photon_org_id | tojson }},
+              redirectURI: {{ photon_redirect_uri | tojson }},
+              developmentMode: {{ (photon_dev_mode == "true") | tojson }},
+            });
+
+            const token = await client.authentication.getAccessToken();
+            const clinicalApiUri = client.clinicalApiUri || "https://clinical-api.neutron.health/graphql";
+
+            // Debug instrumentation: no visible login redirect happened on
+            // this page load, which means getAccessToken() succeeded
+            // silently off an existing Auth0 SSO session rather than a
+            // fresh interactive login -- so which identity/org/role that
+            // token actually carries isn't otherwise observable. Logging
+            // both the decoded token claims and the SDK's own getUser()
+            // result so this is checkable from the browser console instead
+            // of guessed at. Safe to leave in: this is the access token the
+            // browser already holds and is about to send to Photon anyway,
+            // not a secret being newly exposed.
+            try {
+              const payloadB64 = token.split(".")[1].replace(/-/g, "+").replace(/_/g, "/");
+              console.log("[photon-ec-clinician] access token claims:", JSON.parse(atob(payloadB64)));
+            } catch (e) {
+              console.warn("[photon-ec-clinician] could not decode token payload:", e);
+            }
+            try {
+              console.log("[photon-ec-clinician] client.authentication.getUser():", await client.authentication.getUser());
+            } catch (e) {
+              console.warn("[photon-ec-clinician] getUser() failed:", e);
+            }
+
+            const query = `
+              query Query($draftedPrescriptions: [DraftedPrescriptionInput!]!, $patientId: ID!) {
+                prescriptionScreen(draftedPrescriptions: $draftedPrescriptions, patientId: $patientId) {
+                  alerts {
+                    description
+                    involvedEntities {
+                      ... on PrescriptionScreeningAlertInvolvedAllergen { id name }
+                      ... on PrescriptionScreeningAlertInvolvedDraftedPrescription { id name }
+                      ... on PrescriptionScreeningAlertInvolvedExistingPrescription { id name }
+                    }
+                    severity
+                    type
+                  }
+                }
+              }
+            `;
+
+            const resp = await fetch(clinicalApiUri, {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+                "x-photon-auth-token": token,
+                "x-photon-auth-token-type": "auth0",
+              },
+              body: JSON.stringify({
+                query,
+                variables: {
+                  draftedPrescriptions: [{ treatment: { id: treatmentId } }],
+                  patientId: patientId,
+                },
+              }),
+            });
+
+            const responseBody = await resp.json();
+            if (!resp.ok || responseBody.errors) {
+              throw new Error(JSON.stringify(responseBody.errors || responseBody));
+            }
+
+            await reportResult({ screen_result: responseBody.data.prescriptionScreen });
+          } catch (err) {
+            console.error("Browser-side prescriptionScreen failed:", err);
+            if (statusEl) statusEl.textContent = "Live safety check unavailable, falling back to mock data…";
+            await reportResult({ client_error: String((err && err.message) || err) });
+          }
+        })();
+      </script>
+    {% endif %}
+  </div>
+
+  {% if case.chosen_treatment_id and case.approval_fl != 'D' %}
+  <div class="card">
+    <h2 style="margin-top:0">Send via Photon Elements (real prescribing workflow)</h2>
+    <p class="note">
+      This is Photon's own hosted prescribing UI, embedded live -- not a mockup. It requires
+      you to be logged into Photon with prescriber permissions in this browser
+      (Elements' <code>auto-login</code> will redirect you to Photon's login if you
+      aren't). Search for or select <strong>{{ case.chosen_treatment }}</strong> for
+      patient <code>{{ case.photon_patient_id }}</code> inside the widget below to
+      complete the real send.
+    </p>
+    <script type="module">
+      // NOT jsdelivr's "/+esm" auto-bundle endpoint -- confirmed live that
+      // it 500s specifically for this package ("Failed to bundle
+      // @photonhealth/elements@latest as ESM", visible in the network tab
+      // as a same-looking CORS failure in the console, which is what hid
+      // this: Chrome reports a cross-origin script load that comes back
+      // non-2xx as a CORS policy block, even though the response itself
+      // carries a correct Access-Control-Allow-Origin header). That means
+      // <photon-client>/<photon-prescribe-workflow> never got registered
+      // as custom elements at all -- no error surfaced in the UI, no
+      // login redirect, just two inert unknown tags silently rendering as
+      // nothing. @photonhealth/sdk (used elsewhere on this page) isn't
+      // affected -- only this package's auto-bundle fails.
+      //
+      // The fix: @photonhealth/elements already publishes a real native-
+      // ESM build (its package.json "exports" field points "import" at
+      // dist/index.mjs) -- confirmed live that importing that file
+      // directly from jsdelivr, bypassing the "/+esm" bundler entirely,
+      // loads cleanly and defines both custom elements correctly.
+      import "https://cdn.jsdelivr.net/npm/@photonhealth/elements/dist/index.mjs";
+    </script>
+    <photon-client
+      id="{{ photon_elements_client_id }}"
+      org="{{ photon_org_id }}"
+      auto-login="true"
+      redirect-uri="{{ photon_redirect_uri }}"
+      dev-mode="{{ photon_dev_mode }}">
+      <photon-prescribe-workflow
+        patient-id="{{ case.photon_patient_id }}"
+        enable-coverage-check="true">
+      </photon-prescribe-workflow>
+    </photon-client>
+  </div>
+  {% endif %}
+
+  {% if case.chosen_treatment_id and case.approval_fl == 'F' %}
+  <div class="card">
+    <h2 style="margin-top:0">Approve in this system</h2>
+    <p class="muted">
+      Separately from the Elements widget above, this records your review decision
+      in our own database and makes a real attempt at Photon's createPrescription
+      using this app's own (M2M) credentials -- expected to be rejected, since only
+      an authenticated prescriber session (like the widget above) can actually write
+      a prescription. See README.
+    </p>
+    <form method="post" action="{{ url_for('approve_case', case_id=case.id) }}">
+      <button type="submit" class="btn btn-approve">Approve &amp; send to Photon</button>
+    </form>
+    <form method="post" action="{{ url_for('decline_case', case_id=case.id) }}">
+      <button type="submit" class="btn btn-danger">Decline</button>
+    </form>
+  </div>
+  {% elif case.approval_fl == 'T' %}
+  <div class="card">
+    <h2 style="margin-top:0">Approved</h2>
+    <p>Approved at {{ case.approved_at }}.</p>
+    {% if case.rx_write_attempt %}
+      <p class="muted">
+        M2M createPrescription attempt: {{ 'blocked' if case.rx_write_attempt.blocked else 'succeeded' }}
+        ({{ case.rx_write_attempt._source }}){% if case.rx_write_attempt.reason %} &mdash; {{ case.rx_write_attempt.reason }}{% endif %}
+      </p>
+    {% endif %}
+    <a class="btn btn-outline" href="{{ url_for('referral_packet', case_id=case.id) }}">Generate referral packet</a>
+  </div>
+  {% elif case.approval_fl == 'D' %}
+  <div class="card">
+    <h2 style="margin-top:0">Declined</h2>
+    <p>Declined at {{ case.declined_at }}.</p>
+  </div>
+  {% endif %}
+{% endblock %}
